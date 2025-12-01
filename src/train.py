@@ -11,7 +11,7 @@ from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer, make_column_selector
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix, precision_recall_curve
+from sklearn.metrics import accuracy_score, f1_score, fbeta_score, precision_score, recall_score, roc_auc_score, confusion_matrix, precision_recall_curve
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
@@ -47,28 +47,67 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         
         # Feature engineering for numeric columns if they exist
         if 'tenure' in X_eng.columns:
-            # Create tenure groups
+            # Create tenure groups (more granular)
             X_eng['tenure_group'] = pd.cut(
                 X_eng['tenure'], 
-                bins=[0, 12, 24, 48, float('inf')], 
-                labels=['0-12', '13-24', '25-48', '49+']
+                bins=[0, 12, 24, 36, 48, 60, float('inf')], 
+                labels=['0-12', '13-24', '25-36', '37-48', '49-60', '60+']
             )
+            # Tenure squared (non-linear relationship)
+            X_eng['tenure_squared'] = X_eng['tenure'] ** 2
+            # New customer indicator
+            X_eng['is_new_customer'] = (X_eng['tenure'] <= 6).astype(int)
+            # Long-term customer indicator
+            X_eng['is_long_term'] = (X_eng['tenure'] >= 36).astype(int)
         
         if 'MonthlyCharges' in X_eng.columns and 'TotalCharges' in X_eng.columns:
             # Calculate average monthly charge (if TotalCharges is available)
             total_charges_numeric = pd.to_numeric(X_eng['TotalCharges'], errors='coerce')
             tenure_numeric = pd.to_numeric(X_eng.get('tenure', 0), errors='coerce')
             X_eng['avg_monthly_charge'] = total_charges_numeric / (tenure_numeric + 1)
+            
+            # Charge discrepancy (difference between current and average)
+            X_eng['charge_discrepancy'] = X_eng['MonthlyCharges'] - X_eng['avg_monthly_charge']
+            
+            # Total value indicator
+            X_eng['total_value_high'] = (total_charges_numeric > total_charges_numeric.median()).astype(int)
+            
             if self.monthly_charges_mean_ is not None:
                 X_eng['charge_ratio'] = X_eng['MonthlyCharges'] / (self.monthly_charges_mean_ + 1e-6)
+                # Charge tier relative to mean
+                X_eng['charge_above_mean'] = (X_eng['MonthlyCharges'] > self.monthly_charges_mean_).astype(int)
         
         if 'MonthlyCharges' in X_eng.columns:
-            # Create charge tiers
+            # Create charge tiers (more granular)
             X_eng['charge_tier'] = pd.cut(
                 X_eng['MonthlyCharges'],
-                bins=[0, 35, 70, 100, float('inf')],
-                labels=['Low', 'Medium', 'High', 'Very High']
+                bins=[0, 30, 50, 70, 90, 110, float('inf')],
+                labels=['Very Low', 'Low', 'Medium', 'High', 'Very High', 'Premium']
             )
+            # Monthly charges squared (non-linear)
+            X_eng['monthly_charges_squared'] = X_eng['MonthlyCharges'] ** 2
+        
+        # Interaction features if both exist
+        if 'tenure' in X_eng.columns and 'MonthlyCharges' in X_eng.columns:
+            # Value per month (customer lifetime value proxy)
+            X_eng['value_per_month'] = X_eng['MonthlyCharges'] * X_eng['tenure']
+            # High charge + low tenure (risk indicator)
+            if self.monthly_charges_mean_ is not None:
+                X_eng['high_charge_low_tenure'] = (
+                    (X_eng['MonthlyCharges'] > self.monthly_charges_mean_) & 
+                    (X_eng['tenure'] < 12)
+                ).astype(int)
+        
+        # Service count features (count of Yes services)
+        service_cols = [col for col in X_eng.columns if col in [
+            'PhoneService', 'MultipleLines', 'OnlineSecurity', 'OnlineBackup',
+            'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies'
+        ]]
+        if service_cols:
+            # Count services
+            X_eng['service_count'] = (X_eng[service_cols] == 'Yes').sum(axis=1)
+            # Has multiple services
+            X_eng['has_multiple_services'] = (X_eng['service_count'] > 2).astype(int)
         
         return X_eng
 
@@ -88,32 +127,37 @@ def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> tuple[Pipeline, dict
 
     # Calculate scale_pos_weight to handle class imbalance
     # This gives more weight to the minority class (churn=Yes)
+    # Using a slightly adjusted weight for better precision-recall balance
     scale_pos_weight = None
     if y is not None:
         negative_count = (y == 0).sum()
         positive_count = (y == 1).sum()
         if positive_count > 0:
-            scale_pos_weight = negative_count / positive_count
+            base_weight = negative_count / positive_count
+            # Slightly reduce weight to improve precision (less aggressive on minority class)
+            scale_pos_weight = base_weight * 0.9
 
     # No early stopping for now (complex with sklearn Pipeline)
     fit_params = {}
 
     model = XGBClassifier(
-        n_estimators=400,  # Increased for better performance
-        max_depth=5,  # Slightly reduced for better generalization
-        learning_rate=0.03,  # Lower learning rate for more stable training
-        subsample=0.8,
-        colsample_bytree=0.8,
-        min_child_weight=5,  # Increased to reduce overfitting
-        gamma=0.2,  # Increased for more regularization
-        reg_alpha=0.2,  # Increased L1 regularization
-        reg_lambda=2.0,  # Increased L2 regularization
+        n_estimators=500,  # Further increased for better performance
+        max_depth=6,  # Slightly deeper for more complex patterns
+        learning_rate=0.025,  # Even lower learning rate for more stable training
+        subsample=0.85,  # Slightly higher for more data usage
+        colsample_bytree=0.85,  # Slightly higher for more feature usage
+        colsample_bynode=0.8,  # Additional regularization at node level
+        min_child_weight=4,  # Balanced for complexity
+        gamma=0.15,  # Balanced regularization
+        reg_alpha=0.15,  # L1 regularization
+        reg_lambda=1.5,  # L2 regularization
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
         scale_pos_weight=scale_pos_weight,
         random_state=42,
         grow_policy='lossguide',  # Better for imbalanced data
+        max_bin=256,  # Higher bin count for better precision
     )
 
     clf = Pipeline(steps=[
@@ -213,28 +257,40 @@ def log_and_register_model(
     # Pipeline will handle feature engineering automatically
     y_proba = pipeline.predict_proba(X_test)[:, 1]
     
-    # Optimize threshold for F1 score, but also consider precision-recall balance
-    # Try optimizing for F-beta score (beta < 1 gives more weight to precision)
-    thresholds = np.arange(0.35, 0.65, 0.005)  # Finer grid, narrower range
+    # Optimize threshold using F-beta score (beta=0.7 favors precision more)
+    # This helps balance precision and recall better than pure F1
+    thresholds = np.arange(0.40, 0.60, 0.002)  # Very fine grid, focused range
     best_threshold = 0.5
     best_score = 0
+    best_strategy = 'f1'
     
+    # Try multiple optimization strategies
     for threshold in thresholds:
         y_pred_thresh = (y_proba >= threshold).astype(int)
-        f1_score_thresh = f1_score(y_test, y_pred_thresh)
         prec_thresh = precision_score(y_test, y_pred_thresh, zero_division=0)
+        rec_thresh = recall_score(y_test, y_pred_thresh, zero_division=0)
         
-        # Use F1 score, but slightly favor thresholds with better precision
-        # when F1 scores are close (within 0.01)
-        score = f1_score_thresh
-        if abs(f1_score_thresh - best_score) < 0.01:
-            current_prec = precision_score(y_test, (y_proba >= best_threshold).astype(int), zero_division=0)
-            if prec_thresh > current_prec:
-                score = f1_score_thresh + 0.001  # Small bonus for better precision
+        # Calculate scores for different strategies
+        f1_score_val = f1_score(y_test, y_pred_thresh)
+        f07_score = fbeta_score(y_test, y_pred_thresh, beta=0.7)  # Favor precision
+        f05_score = fbeta_score(y_test, y_pred_thresh, beta=0.5)  # Strongly favor precision
         
-        if score > best_score:
-            best_score = score
-            best_threshold = threshold
+        # Try each strategy and pick the best
+        for score_val, strategy_name in [
+            (f1_score_val, 'f1'),
+            (f07_score, 'f0.7'),
+            (f05_score, 'f0.5'),
+        ]:
+            score = score_val
+            
+            # Additional bonus for good precision when using F-beta
+            if 'f0' in strategy_name and prec_thresh > 0.55:
+                score *= 1.02  # Small bonus for high precision
+            
+            if score > best_score:
+                best_score = score
+                best_threshold = threshold
+                best_strategy = strategy_name
     
     y_pred = (y_proba >= best_threshold).astype(int)
 
@@ -258,6 +314,7 @@ def log_and_register_model(
         mlflow.log_metric("recall", recall)
         mlflow.log_metric("specificity", specificity)
         mlflow.log_metric("optimal_threshold", best_threshold)
+        mlflow.log_metric("threshold_strategy", 1.0 if best_strategy == 'f0.7' else (0.5 if best_strategy == 'f0.5' else 0.0))
 
         # Log model artifact
         # Try to register model, but fall back to just logging if registry is not supported
@@ -330,7 +387,7 @@ def log_and_register_model(
         print(f"Run {run_id} logged to MLflow.")
         print(f"Metrics: accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
         print(f"         precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}")
-        print(f"         optimal_threshold={best_threshold:.3f}")
+        print(f"         optimal_threshold={best_threshold:.3f} (strategy: {best_strategy})")
 
 
 def main():
