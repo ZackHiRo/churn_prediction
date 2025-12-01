@@ -6,6 +6,7 @@ import mlflow.sklearn
 import numpy as np
 import pandas as pd
 from feast import FeatureStore
+from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
 from sklearn.compose import ColumnTransformer
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -45,7 +46,6 @@ def build_pipeline(X: pd.DataFrame) -> Pipeline:
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
-        use_label_encoder=False,
     )
 
     clf = Pipeline(steps=[("preprocessor", preprocessor), ("model", model)])
@@ -151,11 +151,34 @@ def log_and_register_model(
         mlflow.log_metric("roc_auc", roc)
 
         # Log model artifact
-        mlflow.sklearn.log_model(
-            sk_model=pipeline,
-            artifact_path="model",
-            registered_model_name=register_as,
-        )
+        # Try to register model, but fall back to just logging if registry is not supported
+        # (e.g., DagsHub doesn't support model registry operations)
+        try:
+            mlflow.sklearn.log_model(
+                sk_model=pipeline,
+                artifact_path="model",
+                registered_model_name=register_as,
+            )
+            print(f"Model registered as '{register_as}' in MLflow model registry")
+        except RestException as e:
+            # If model registration fails (e.g., DagsHub doesn't support it),
+            # just log the model without registering
+            if "unsupported endpoint" in str(e).lower():
+                print(f"Warning: Model registry not supported by tracking server. Logging model without registration.")
+                mlflow.sklearn.log_model(
+                    sk_model=pipeline,
+                    artifact_path="model",
+                )
+            else:
+                # Re-raise if it's a different RestException
+                raise
+        except Exception as e:
+            # For any other exception, try logging without registration as fallback
+            print(f"Warning: Model registration failed ({type(e).__name__}). Logging model without registration.")
+            mlflow.sklearn.log_model(
+                sk_model=pipeline,
+                artifact_path="model",
+            )
 
         run_id = run.info.run_id
         print(f"Run {run_id} logged to MLflow. accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
