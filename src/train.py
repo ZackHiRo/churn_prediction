@@ -153,6 +153,8 @@ def log_and_register_model(
         # Log model artifact
         # Try to register model, but fall back to just logging if registry is not supported
         # (e.g., DagsHub doesn't support model registry operations)
+        # Note: DagsHub may not support model logging endpoints at all, so we gracefully handle failures
+        model_logged = False
         try:
             mlflow.sklearn.log_model(
                 sk_model=pipeline,
@@ -160,25 +162,60 @@ def log_and_register_model(
                 registered_model_name=register_as,
             )
             print(f"Model registered as '{register_as}' in MLflow model registry")
+            model_logged = True
         except RestException as e:
-            # If model registration fails (e.g., DagsHub doesn't support it),
-            # just log the model without registering
-            if "unsupported endpoint" in str(e).lower():
-                print(f"Warning: Model registry not supported by tracking server. Logging model without registration.")
+            # Check if this is an unsupported endpoint error (DagsHub limitation)
+            error_str = str(e).lower()
+            if "unsupported endpoint" in error_str or "dagshub" in error_str:
+                print(f"Warning: Model registry not supported by tracking server. Attempting to log model without registration.")
+                try:
+                    mlflow.sklearn.log_model(
+                        sk_model=pipeline,
+                        artifact_path="model",
+                    )
+                    model_logged = True
+                    print("Model logged successfully (without registration)")
+                except RestException as e2:
+                    # Even logging without registration may fail on DagsHub
+                    error_str2 = str(e2).lower()
+                    if "unsupported endpoint" in error_str2 or "dagshub" in error_str2:
+                        print(f"Warning: Model logging endpoint not supported by tracking server. Skipping model artifact logging.")
+                    else:
+                        print(f"Warning: Model logging failed. Skipping model artifact logging. Error: {e2}")
+                except Exception as e2:
+                    print(f"Warning: Model logging failed ({type(e2).__name__}). Skipping model artifact logging.")
+            else:
+                # Re-raise if it's a different RestException that we don't know how to handle
+                print(f"Warning: Unexpected RestException during model registration: {e}. Attempting fallback.")
+                try:
+                    mlflow.sklearn.log_model(
+                        sk_model=pipeline,
+                        artifact_path="model",
+                    )
+                    model_logged = True
+                except Exception:
+                    print(f"Warning: Fallback model logging also failed. Skipping model artifact logging.")
+        except Exception as e:
+            # For any other exception, try logging without registration as fallback
+            print(f"Warning: Model registration failed ({type(e).__name__}). Attempting to log model without registration.")
+            try:
                 mlflow.sklearn.log_model(
                     sk_model=pipeline,
                     artifact_path="model",
                 )
-            else:
-                # Re-raise if it's a different RestException
-                raise
-        except Exception as e:
-            # For any other exception, try logging without registration as fallback
-            print(f"Warning: Model registration failed ({type(e).__name__}). Logging model without registration.")
-            mlflow.sklearn.log_model(
-                sk_model=pipeline,
-                artifact_path="model",
-            )
+                model_logged = True
+            except RestException as e2:
+                # Handle RestException specifically in fallback
+                error_str2 = str(e2).lower()
+                if "unsupported endpoint" in error_str2 or "dagshub" in error_str2:
+                    print(f"Warning: Model logging endpoint not supported. Skipping model artifact logging.")
+                else:
+                    print(f"Warning: Model logging failed. Skipping model artifact logging. Error: {e2}")
+            except Exception as e2:
+                print(f"Warning: Model logging also failed ({type(e2).__name__}). Skipping model artifact logging.")
+        
+        if not model_logged:
+            print("Note: Model metrics were logged, but model artifact could not be saved due to tracking server limitations.")
 
         run_id = run.info.run_id
         print(f"Run {run_id} logged to MLflow. accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
