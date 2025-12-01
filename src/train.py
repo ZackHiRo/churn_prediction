@@ -9,7 +9,7 @@ from feast import FeatureStore
 from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
@@ -24,11 +24,11 @@ def _get_feature_types(df: pd.DataFrame):
     return numeric_features, categorical_features
 
 
-def build_pipeline(X: pd.DataFrame) -> Pipeline:
+def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> Pipeline:
     numeric_features, categorical_features = _get_feature_types(X)
 
     numeric_transformer = StandardScaler()
-    categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+    categorical_transformer = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 
     preprocessor = ColumnTransformer(
         transformers=[
@@ -37,15 +37,30 @@ def build_pipeline(X: pd.DataFrame) -> Pipeline:
         ]
     )
 
+    # Calculate scale_pos_weight to handle class imbalance
+    # This gives more weight to the minority class (churn=Yes)
+    scale_pos_weight = None
+    if y is not None:
+        negative_count = (y == 0).sum()
+        positive_count = (y == 1).sum()
+        if positive_count > 0:
+            scale_pos_weight = negative_count / positive_count
+
     model = XGBClassifier(
-        n_estimators=200,
-        max_depth=4,
-        learning_rate=0.1,
-        subsample=0.8,
-        colsample_bytree=0.8,
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_weight=3,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
+        scale_pos_weight=scale_pos_weight,
+        random_state=42,
     )
 
     clf = Pipeline(steps=[("preprocessor", preprocessor), ("model", model)])
@@ -144,11 +159,22 @@ def log_and_register_model(
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
     roc = roc_auc_score(y_test, y_proba)
+    
+    # Additional metrics for imbalanced classification
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+    
+    # Calculate specificity (true negative rate)
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     with mlflow.start_run(run_name=run_name) as run:
         mlflow.log_metric("accuracy", acc)
         mlflow.log_metric("f1", f1)
         mlflow.log_metric("roc_auc", roc)
+        mlflow.log_metric("precision", precision)
+        mlflow.log_metric("recall", recall)
+        mlflow.log_metric("specificity", specificity)
 
         # Log model artifact
         # Try to register model, but fall back to just logging if registry is not supported
@@ -218,7 +244,9 @@ def log_and_register_model(
             print("Note: Model metrics were logged, but model artifact could not be saved due to tracking server limitations.")
 
         run_id = run.info.run_id
-        print(f"Run {run_id} logged to MLflow. accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
+        print(f"Run {run_id} logged to MLflow.")
+        print(f"Metrics: accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
+        print(f"         precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}")
 
 
 def main():
@@ -237,7 +265,8 @@ def main():
     X, y = load_training_data_with_optional_feast(data_path, target_column)
     X_train, X_test, y_train, y_test = train_test_split_data(X, y)
 
-    clf = build_pipeline(X_train)
+    # Pass y_train to build_pipeline for class weight calculation
+    clf = build_pipeline(X_train, y_train)
 
     client = configure_mlflow()
 
