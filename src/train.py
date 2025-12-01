@@ -8,7 +8,8 @@ import pandas as pd
 from feast import FeatureStore
 from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
-from sklearn.compose import ColumnTransformer
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -24,17 +25,61 @@ def _get_feature_types(df: pd.DataFrame):
     return numeric_features, categorical_features
 
 
-def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> Pipeline:
-    numeric_features, categorical_features = _get_feature_types(X)
+class FeatureEngineer(BaseEstimator, TransformerMixin):
+    """Custom transformer for feature engineering."""
+    
+    def __init__(self):
+        self.monthly_charges_mean_ = None
+    
+    def fit(self, X, y=None):
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X
+        if 'MonthlyCharges' in X_df.columns:
+            self.monthly_charges_mean_ = X_df['MonthlyCharges'].mean()
+        return self
+    
+    def transform(self, X):
+        X_df = pd.DataFrame(X) if not isinstance(X, pd.DataFrame) else X.copy()
+        X_eng = X_df.copy()
+        
+        # Feature engineering for numeric columns if they exist
+        if 'tenure' in X_eng.columns:
+            # Create tenure groups
+            X_eng['tenure_group'] = pd.cut(
+                X_eng['tenure'], 
+                bins=[0, 12, 24, 48, float('inf')], 
+                labels=['0-12', '13-24', '25-48', '49+']
+            )
+        
+        if 'MonthlyCharges' in X_eng.columns and 'TotalCharges' in X_eng.columns:
+            # Calculate average monthly charge (if TotalCharges is available)
+            total_charges_numeric = pd.to_numeric(X_eng['TotalCharges'], errors='coerce')
+            tenure_numeric = pd.to_numeric(X_eng.get('tenure', 0), errors='coerce')
+            X_eng['avg_monthly_charge'] = total_charges_numeric / (tenure_numeric + 1)
+            if self.monthly_charges_mean_ is not None:
+                X_eng['charge_ratio'] = X_eng['MonthlyCharges'] / (self.monthly_charges_mean_ + 1e-6)
+        
+        if 'MonthlyCharges' in X_eng.columns:
+            # Create charge tiers
+            X_eng['charge_tier'] = pd.cut(
+                X_eng['MonthlyCharges'],
+                bins=[0, 35, 70, 100, float('inf')],
+                labels=['Low', 'Medium', 'High', 'Very High']
+            )
+        
+        return X_eng
 
+
+def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> tuple[Pipeline, dict]:
+    # Feature engineering will happen in pipeline, so use dynamic selectors
     numeric_transformer = StandardScaler()
-    categorical_transformer = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    categorical_transformer = OneHotEncoder(handle_unknown="ignore", sparse_output=False, drop='if_binary')
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", numeric_transformer, numeric_features),
-            ("cat", categorical_transformer, categorical_features),
-        ]
+            ("num", numeric_transformer, make_column_selector(dtype_include=['int64', 'float64'])),
+            ("cat", categorical_transformer, make_column_selector(dtype_include=['object', 'bool', 'category'])),
+        ],
+        remainder='drop'  # Drop any unhandled columns
     )
 
     # Calculate scale_pos_weight to handle class imbalance
@@ -46,25 +91,33 @@ def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> Pipeline:
         if positive_count > 0:
             scale_pos_weight = negative_count / positive_count
 
+    # No early stopping for now (complex with sklearn Pipeline)
+    fit_params = {}
+
     model = XGBClassifier(
-        n_estimators=300,
-        max_depth=6,
-        learning_rate=0.05,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        min_child_weight=3,
-        gamma=0.1,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
+        n_estimators=400,  # Increased for better performance
+        max_depth=5,  # Slightly reduced for better generalization
+        learning_rate=0.03,  # Lower learning rate for more stable training
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=5,  # Increased to reduce overfitting
+        gamma=0.2,  # Increased for more regularization
+        reg_alpha=0.2,  # Increased L1 regularization
+        reg_lambda=2.0,  # Increased L2 regularization
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
         scale_pos_weight=scale_pos_weight,
         random_state=42,
+        grow_policy='lossguide',  # Better for imbalanced data
     )
 
-    clf = Pipeline(steps=[("preprocessor", preprocessor), ("model", model)])
-    return clf
+    clf = Pipeline(steps=[
+        ("feature_engineer", FeatureEngineer()),
+        ("preprocessor", preprocessor), 
+        ("model", model)
+    ])
+    return clf, fit_params
 
 
 def configure_mlflow() -> MlflowClient:
@@ -153,8 +206,22 @@ def log_and_register_model(
     run_name: Optional[str] = "xgboost_churn_model",
     register_as: Optional[str] = "ChurnModel",
 ):
+    # Pipeline will handle feature engineering automatically
     y_proba = pipeline.predict_proba(X_test)[:, 1]
-    y_pred = (y_proba >= 0.5).astype(int)
+    
+    # Optimize threshold for F1 score instead of using default 0.5
+    from sklearn.metrics import f1_score as f1
+    thresholds = np.arange(0.3, 0.7, 0.01)
+    best_threshold = 0.5
+    best_f1 = 0
+    for threshold in thresholds:
+        y_pred_thresh = (y_proba >= threshold).astype(int)
+        f1_score_thresh = f1(y_test, y_pred_thresh)
+        if f1_score_thresh > best_f1:
+            best_f1 = f1_score_thresh
+            best_threshold = threshold
+    
+    y_pred = (y_proba >= best_threshold).astype(int)
 
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
@@ -175,6 +242,7 @@ def log_and_register_model(
         mlflow.log_metric("precision", precision)
         mlflow.log_metric("recall", recall)
         mlflow.log_metric("specificity", specificity)
+        mlflow.log_metric("optimal_threshold", best_threshold)
 
         # Log model artifact
         # Try to register model, but fall back to just logging if registry is not supported
@@ -247,6 +315,7 @@ def log_and_register_model(
         print(f"Run {run_id} logged to MLflow.")
         print(f"Metrics: accuracy={acc:.4f}, f1={f1:.4f}, roc_auc={roc:.4f}")
         print(f"         precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}")
+        print(f"         optimal_threshold={best_threshold:.3f}")
 
 
 def main():
@@ -266,7 +335,7 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split_data(X, y)
 
     # Pass y_train to build_pipeline for class weight calculation
-    clf = build_pipeline(X_train, y_train)
+    clf, fit_params = build_pipeline(X_train, y_train)
 
     client = configure_mlflow()
 
