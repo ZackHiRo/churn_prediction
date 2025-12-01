@@ -11,7 +11,8 @@ from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer, make_column_selector
-from sklearn.metrics import accuracy_score, f1_score, fbeta_score, precision_score, recall_score, roc_auc_score, confusion_matrix, precision_recall_curve
+from sklearn.metrics import accuracy_score, f1_score, fbeta_score, precision_score, recall_score, roc_auc_score, confusion_matrix, precision_recall_curve, make_scorer
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
@@ -112,7 +113,35 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         return X_eng
 
 
-def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> tuple[Pipeline, dict]:
+def get_param_grid(scale_pos_weight: float = None) -> dict:
+    """Define parameter grid for hyperparameter tuning."""
+    base_params = {
+        'model__n_estimators': [300, 400, 500, 600],
+        'model__max_depth': [4, 5, 6, 7],
+        'model__learning_rate': [0.01, 0.02, 0.025, 0.03, 0.04],
+        'model__subsample': [0.75, 0.8, 0.85, 0.9],
+        'model__colsample_bytree': [0.75, 0.8, 0.85, 0.9],
+        'model__colsample_bynode': [0.7, 0.75, 0.8, 0.85],
+        'model__min_child_weight': [3, 4, 5, 6],
+        'model__gamma': [0.1, 0.15, 0.2, 0.25],
+        'model__reg_alpha': [0.1, 0.15, 0.2, 0.25],
+        'model__reg_lambda': [1.0, 1.5, 2.0, 2.5],
+    }
+    
+    if scale_pos_weight is not None:
+        # Try different adjustments to scale_pos_weight
+        base_params['model__scale_pos_weight'] = [
+            scale_pos_weight * 0.85,
+            scale_pos_weight * 0.9,
+            scale_pos_weight * 0.95,
+            scale_pos_weight,
+            scale_pos_weight * 1.05,
+        ]
+    
+    return base_params
+
+
+def build_pipeline(X: pd.DataFrame, y: pd.Series = None, use_tuning: bool = False) -> tuple[Pipeline | RandomizedSearchCV, dict]:
     # Feature engineering will happen in pipeline, so use dynamic selectors
     numeric_transformer = StandardScaler()
     categorical_transformer = OneHotEncoder(handle_unknown="ignore", sparse_output=False, drop='if_binary')
@@ -140,24 +169,25 @@ def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> tuple[Pipeline, dict
     # No early stopping for now (complex with sklearn Pipeline)
     fit_params = {}
 
+    # Base model with default parameters (will be tuned if use_tuning=True)
     model = XGBClassifier(
-        n_estimators=500,  # Further increased for better performance
-        max_depth=6,  # Slightly deeper for more complex patterns
-        learning_rate=0.025,  # Even lower learning rate for more stable training
-        subsample=0.85,  # Slightly higher for more data usage
-        colsample_bytree=0.85,  # Slightly higher for more feature usage
-        colsample_bynode=0.8,  # Additional regularization at node level
-        min_child_weight=4,  # Balanced for complexity
-        gamma=0.15,  # Balanced regularization
-        reg_alpha=0.15,  # L1 regularization
-        reg_lambda=1.5,  # L2 regularization
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.025,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        colsample_bynode=0.8,
+        min_child_weight=4,
+        gamma=0.15,
+        reg_alpha=0.15,
+        reg_lambda=1.5,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
         scale_pos_weight=scale_pos_weight,
         random_state=42,
-        grow_policy='lossguide',  # Better for imbalanced data
-        max_bin=256,  # Higher bin count for better precision
+        grow_policy='lossguide',
+        max_bin=256,
     )
 
     clf = Pipeline(steps=[
@@ -165,6 +195,37 @@ def build_pipeline(X: pd.DataFrame, y: pd.Series = None) -> tuple[Pipeline, dict
         ("preprocessor", preprocessor), 
         ("model", model)
     ])
+    
+    # If hyperparameter tuning is enabled, wrap in RandomizedSearchCV
+    if use_tuning and y is not None:
+        param_grid = get_param_grid(scale_pos_weight)
+        
+        # Use F1 score as the primary metric, but also consider F-beta
+        scoring = {
+            'f1': make_scorer(f1_score),
+            'fbeta_07': make_scorer(fbeta_score, beta=0.7),
+            'roc_auc': make_scorer(roc_auc_score),
+            'precision': make_scorer(precision_score, zero_division=0),
+        }
+        
+        # Use stratified K-fold for cross-validation
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        
+        # RandomizedSearchCV for efficiency (tests 30 random combinations)
+        search = RandomizedSearchCV(
+            clf,
+            param_distributions=param_grid,
+            n_iter=30,  # Number of parameter settings sampled
+            scoring=scoring,
+            refit='f1',  # Refit with best F1 score
+            cv=cv,
+            n_jobs=-1,  # Use all available cores
+            random_state=42,
+            verbose=1,
+        )
+        
+        return search, fit_params
+    
     return clf, fit_params
 
 
@@ -315,6 +376,15 @@ def log_and_register_model(
         mlflow.log_metric("specificity", specificity)
         mlflow.log_metric("optimal_threshold", best_threshold)
         mlflow.log_metric("threshold_strategy", 1.0 if best_strategy == 'f0.7' else (0.5 if best_strategy == 'f0.5' else 0.0))
+        
+        # Log model hyperparameters if available
+        if hasattr(pipeline.named_steps['model'], 'get_params'):
+            model_params = pipeline.named_steps['model'].get_params()
+            for param_name in ['n_estimators', 'max_depth', 'learning_rate', 'subsample', 
+                             'colsample_bytree', 'min_child_weight', 'gamma', 'reg_alpha', 
+                             'reg_lambda', 'scale_pos_weight']:
+                if param_name in model_params:
+                    mlflow.log_param(f"model_{param_name}", model_params[param_name])
 
         # Log model artifact
         # Try to register model, but fall back to just logging if registry is not supported
@@ -395,10 +465,12 @@ def main():
     Main training entrypoint:
     - Load CSV data from DATA_PATH (env) and TARGET_COLUMN (env)
     - Train XGBoost classifier inside sklearn pipeline
+    - Optionally perform hyperparameter tuning if ENABLE_HYPERPARAMETER_TUNING is set
     - Log metrics + model to MLflow (DagsHub)
     """
     data_path = os.getenv("DATA_PATH", "data/churn.csv")
     target_column = os.getenv("TARGET_COLUMN", "churn")
+    enable_tuning = os.getenv("ENABLE_HYPERPARAMETER_TUNING", "").lower() in {"1", "true", "yes"}
 
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Data file not found at {data_path}")
@@ -406,14 +478,38 @@ def main():
     X, y = load_training_data_with_optional_feast(data_path, target_column)
     X_train, X_test, y_train, y_test = train_test_split_data(X, y)
 
-    # Pass y_train to build_pipeline for class weight calculation
-    clf, fit_params = build_pipeline(X_train, y_train)
-
     client = configure_mlflow()
 
-    clf.fit(X_train, y_train)
+    # Build pipeline (with or without hyperparameter tuning)
+    clf, fit_params = build_pipeline(X_train, y_train, use_tuning=enable_tuning)
 
-    log_and_register_model(clf, X_test, y_test)
+    if enable_tuning:
+        print("Starting hyperparameter tuning with RandomizedSearchCV...")
+        print(f"Testing {clf.n_iter} parameter combinations with {clf.cv.n_splits}-fold CV")
+        clf.fit(X_train, y_train)
+        
+        print(f"\nBest parameters found:")
+        for param, value in clf.best_params_.items():
+            print(f"  {param}: {value}")
+        print(f"Best CV F1 score: {clf.best_score_:.4f}")
+        
+        # Log best parameters to MLflow
+        with mlflow.start_run(run_name="hyperparameter_tuning") as tuning_run:
+            for param, value in clf.best_params_.items():
+                mlflow.log_param(param, value)
+            mlflow.log_metric("best_cv_f1", clf.best_score_)
+            for metric_name, scores in clf.cv_results_.items():
+                if metric_name.startswith('mean_test_'):
+                    mlflow.log_metric(metric_name, scores[clf.best_index_])
+        
+        # Use the best estimator for final evaluation
+        best_clf = clf.best_estimator_
+    else:
+        print("Training model with default hyperparameters...")
+        clf.fit(X_train, y_train)
+        best_clf = clf
+
+    log_and_register_model(best_clf, X_test, y_test)
 
 
 if __name__ == "__main__":
