@@ -20,6 +20,12 @@ This project is a production-grade churn prediction system built to run on free-
 
 ### Key Environment Variables
 
+> **📝 Quick Start**: Copy `env.example` to `.env` and fill in your values:
+> ```bash
+> cp env.example .env
+> # Edit .env with your DagsHub URI, token, and data paths
+> ```
+
 **MLflow / DagsHub**
 
 - `MLFLOW_TRACKING_URI` – MLflow tracking URI (DagsHub project URI)
