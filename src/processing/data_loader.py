@@ -6,8 +6,21 @@ from sklearn.model_selection import train_test_split
 
 def load_data(csv_path: str, target_column: str) -> Tuple[pd.DataFrame, pd.Series]:
     df = pd.read_csv(csv_path)
-    y = df[target_column]
-    X = df.drop(columns=[target_column])
+    # Case-insensitive column matching
+    target_col = None
+    for col in df.columns:
+        if col.lower() == target_column.lower():
+            target_col = col
+            break
+    
+    if target_col is None:
+        raise ValueError(
+            f"Target column '{target_column}' not found in CSV. "
+            f"Available columns: {list(df.columns)}"
+        )
+    
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
     return X, y
 
 
