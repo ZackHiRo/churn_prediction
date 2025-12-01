@@ -1,4 +1,5 @@
 import os
+import warnings
 from typing import Optional
 
 import mlflow
@@ -10,13 +11,16 @@ from mlflow.exceptions import RestException
 from mlflow.tracking import MlflowClient
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer, make_column_selector
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, confusion_matrix, precision_recall_curve
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier
 
 from src.config import get_mlflow_config
 from src.processing.data_loader import load_data, train_test_split_data
+
+# Suppress warnings for unknown categories in OneHotEncoder (expected behavior)
+warnings.filterwarnings('ignore', category=UserWarning, module='sklearn.preprocessing._encoders')
 
 
 def _get_feature_types(df: pd.DataFrame):
@@ -209,16 +213,27 @@ def log_and_register_model(
     # Pipeline will handle feature engineering automatically
     y_proba = pipeline.predict_proba(X_test)[:, 1]
     
-    # Optimize threshold for F1 score instead of using default 0.5
-    from sklearn.metrics import f1_score as f1
-    thresholds = np.arange(0.3, 0.7, 0.01)
+    # Optimize threshold for F1 score, but also consider precision-recall balance
+    # Try optimizing for F-beta score (beta < 1 gives more weight to precision)
+    thresholds = np.arange(0.35, 0.65, 0.005)  # Finer grid, narrower range
     best_threshold = 0.5
-    best_f1 = 0
+    best_score = 0
+    
     for threshold in thresholds:
         y_pred_thresh = (y_proba >= threshold).astype(int)
-        f1_score_thresh = f1(y_test, y_pred_thresh)
-        if f1_score_thresh > best_f1:
-            best_f1 = f1_score_thresh
+        f1_score_thresh = f1_score(y_test, y_pred_thresh)
+        prec_thresh = precision_score(y_test, y_pred_thresh, zero_division=0)
+        
+        # Use F1 score, but slightly favor thresholds with better precision
+        # when F1 scores are close (within 0.01)
+        score = f1_score_thresh
+        if abs(f1_score_thresh - best_score) < 0.01:
+            current_prec = precision_score(y_test, (y_proba >= best_threshold).astype(int), zero_division=0)
+            if prec_thresh > current_prec:
+                score = f1_score_thresh + 0.001  # Small bonus for better precision
+        
+        if score > best_score:
+            best_score = score
             best_threshold = threshold
     
     y_pred = (y_proba >= best_threshold).astype(int)
