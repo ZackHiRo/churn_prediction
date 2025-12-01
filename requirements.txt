@@ -1,0 +1,9 @@
+mlflow
+pandas
+scikit-learn
+xgboost
+feast
+fastapi
+mangum
+uvicorn
+

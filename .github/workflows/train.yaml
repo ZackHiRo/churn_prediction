@@ -1,0 +1,40 @@
+name: Train Model
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          pytest -q
+
+      - name: Train model
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_EXPERIMENT_NAME: churn_prediction
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+          DATA_PATH: data/churn.csv
+          TARGET_COLUMN: churn
+        run: |
+          python -m src.train
+
+
