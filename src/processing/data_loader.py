@@ -20,6 +20,21 @@ def load_data(csv_path: str, target_column: str) -> Tuple[pd.DataFrame, pd.Serie
         )
     
     y = df[target_col]
+    
+    # Convert target to numeric if it contains string values (e.g., "Yes"/"No" -> 1/0)
+    if y.dtype == 'object' or y.dtype.name == 'category':
+        # Map common binary string values to 0/1
+        unique_vals = y.unique()
+        if len(unique_vals) == 2:
+            # Sort to ensure consistent mapping (first value -> 0, second -> 1)
+            sorted_vals = sorted(unique_vals)
+            y = y.map({sorted_vals[0]: 0, sorted_vals[1]: 1})
+        else:
+            raise ValueError(
+                f"Target column '{target_column}' has {len(unique_vals)} unique values. "
+                f"Expected 2 for binary classification. Values: {unique_vals}"
+            )
+    
     X = df.drop(columns=[target_col])
     return X, y
 
