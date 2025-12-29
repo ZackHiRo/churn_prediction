@@ -20,9 +20,12 @@ RUN yum install -y gcc gcc-c++ make curl tar gzip && \
 COPY requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 
 # Upgrade pip and install Python dependencies
-# xgboost will use pre-built wheels (preferred) or build from source if needed
+# Force xgboost to use pre-built wheels only (fail if not available, then try older version)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+    pip install --no-cache-dir $(grep -v xgboost ${LAMBDA_TASK_ROOT}/requirements.txt) && \
+    (pip install --no-cache-dir --only-binary :all: xgboost || \
+     (echo "No pre-built wheel available for xgboost 3.x, trying xgboost 2.x..." && \
+      pip install --no-cache-dir --only-binary :all: "xgboost<3.0.0,>=2.0.0"))
 
 # Copy application source
 COPY src ${LAMBDA_TASK_ROOT}/src
