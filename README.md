@@ -113,4 +113,25 @@ The container:
 - **`.github/workflows/deploy.yaml`**
   - On GitHub release, builds the Docker image and pushes it to ECR using OIDC (no long-lived AWS keys)
 
+### Deployment to AWS Lambda
+
+**📚 Full Deployment Guide**: See [LAMBDA_DEPLOYMENT.md](./LAMBDA_DEPLOYMENT.md) for detailed step-by-step instructions.
+
+**⚡ Quick Start**: See [LAMBDA_QUICKSTART.md](./LAMBDA_QUICKSTART.md) for a fast-track deployment.
+
+**Helper Scripts**:
+- `scripts/test-lambda-local.sh` - Test Lambda function locally using Docker
+- `scripts/deploy-lambda.sh` - Deploy Docker image to ECR and update Lambda function
+
+**Quick Deploy**:
+```bash
+# Test locally first
+export MLFLOW_TRACKING_URI=your_uri
+export DAGSHUB_TOKEN=your_token
+./scripts/test-lambda-local.sh
+
+# Deploy to AWS
+./scripts/deploy-lambda.sh latest
+```
+
 
