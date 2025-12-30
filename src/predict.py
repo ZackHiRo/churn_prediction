@@ -122,10 +122,20 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
     - {"records": [ {feature: value, ...}, ... ]}
     - or a single record dict {feature: value, ...}
     """
+    import sys
+    print("=" * 50, flush=True)
+    print("predict_from_json called", flush=True)
+    print(f"Payload keys: {list(payload.keys()) if isinstance(payload, dict) else 'not a dict'}", flush=True)
+    sys.stdout.flush()
+    
     if "records" in payload:
         df = pd.DataFrame(payload["records"])
     else:
         df = pd.DataFrame([payload])
+    
+    print(f"DataFrame created with shape: {df.shape}", flush=True)
+    print(f"Initial columns: {list(df.columns)}", flush=True)
+    sys.stdout.flush()
 
     # Handle ID columns: The model expects customerID if it was in training data.
     # The ColumnTransformer was fitted with customerID, so we need to provide it.
@@ -216,13 +226,29 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
             df[col] = 0.0
 
     # Debug: Log column dtypes before prediction (helpful for troubleshooting)
-    print(f"DataFrame dtypes before prediction (input columns only):")
+    import sys
+    print(f"DataFrame dtypes before prediction (input columns only):", flush=True)
+    sys.stdout.flush()
     for col in input_categorical_cols + input_numeric_cols:
         if col in df.columns:
-            print(f"  {col}: {df[col].dtype} (sample value: {df[col].iloc[0] if len(df) > 0 else 'N/A'})")
+            print(f"  {col}: {df[col].dtype} (sample value: {df[col].iloc[0] if len(df) > 0 else 'N/A'})", flush=True)
+    sys.stdout.flush()
+    
+    print(f"Total columns in DataFrame: {len(df.columns)}", flush=True)
+    print(f"All columns: {list(df.columns)}", flush=True)
+    sys.stdout.flush()
 
-    # Now run prediction
-    preds = model.predict(df)
+    # Now run prediction with error handling
+    try:
+        preds = model.predict(df)
+    except Exception as e:
+        # Log detailed error information
+        print(f"ERROR during prediction: {type(e).__name__}: {str(e)}", flush=True)
+        print(f"DataFrame shape: {df.shape}", flush=True)
+        print(f"DataFrame dtypes:\n{df.dtypes}", flush=True)
+        print(f"DataFrame info:\n{df.info()}", flush=True)
+        sys.stdout.flush()
+        raise
 
     # Ensure list of floats (probabilities or labels depending on model)
     if hasattr(preds, "tolist"):
