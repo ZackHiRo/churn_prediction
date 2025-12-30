@@ -48,12 +48,17 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         
         # Feature engineering for numeric columns if they exist
         if 'tenure' in X_eng.columns:
+            # Ensure tenure is numeric and fill NaN with 0
+            tenure_clean = pd.to_numeric(X_eng['tenure'], errors='coerce').fillna(0)
             # Create tenure groups (more granular)
             X_eng['tenure_group'] = pd.cut(
-                X_eng['tenure'], 
+                tenure_clean, 
                 bins=[0, 12, 24, 36, 48, 60, float('inf')], 
-                labels=['0-12', '13-24', '25-36', '37-48', '49-60', '60+']
+                labels=['0-12', '13-24', '25-36', '37-48', '49-60', '60+'],
+                include_lowest=True
             )
+            # Convert categorical to string to avoid type issues in OneHotEncoder
+            X_eng['tenure_group'] = X_eng['tenure_group'].astype(str).replace('nan', 'Unknown').replace('<NA>', 'Unknown')
             # Tenure squared (non-linear relationship)
             X_eng['tenure_squared'] = X_eng['tenure'] ** 2
             # New customer indicator
@@ -79,12 +84,17 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
                 X_eng['charge_above_mean'] = (X_eng['MonthlyCharges'] > self.monthly_charges_mean_).astype(int)
         
         if 'MonthlyCharges' in X_eng.columns:
+            # Ensure MonthlyCharges is numeric and fill NaN with 0
+            monthly_charges_clean = pd.to_numeric(X_eng['MonthlyCharges'], errors='coerce').fillna(0)
             # Create charge tiers (more granular)
             X_eng['charge_tier'] = pd.cut(
-                X_eng['MonthlyCharges'],
+                monthly_charges_clean,
                 bins=[0, 30, 50, 70, 90, 110, float('inf')],
-                labels=['Very Low', 'Low', 'Medium', 'High', 'Very High', 'Premium']
+                labels=['Very Low', 'Low', 'Medium', 'High', 'Very High', 'Premium'],
+                include_lowest=True
             )
+            # Convert categorical to string to avoid type issues in OneHotEncoder
+            X_eng['charge_tier'] = X_eng['charge_tier'].astype(str).replace('nan', 'Unknown').replace('<NA>', 'Unknown')
             # Monthly charges squared (non-linear)
             X_eng['monthly_charges_squared'] = X_eng['MonthlyCharges'] ** 2
         
