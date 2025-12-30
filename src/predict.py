@@ -176,20 +176,45 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
         "Partner",
         "Dependents",
         "gender",
+        # FeatureEngineer creates these categorical columns
+        "tenure_group",
+        "charge_tier",
     ]
     
     # Convert categorical columns to strings (object dtype)
     # This must happen BEFORE any sklearn operations
     for col in categorical_cols:
         if col in df.columns:
-            # Force to string, handling None/NaN
-            df[col] = df[col].astype(str).replace('nan', 'Unknown').replace('None', 'Unknown')
+            # Force to string, handling None/NaN and category types
+            if df[col].dtype.name == 'category':
+                df[col] = df[col].astype(str)
+            else:
+                df[col] = df[col].astype(str).replace('nan', 'Unknown').replace('None', 'Unknown')
         # If column is missing, add it with a default value
         else:
             df[col] = 'Unknown'
 
     # Define numeric columns (will be StandardScaled)
-    numeric_cols = ["tenure", "MonthlyCharges", "TotalCharges", "SeniorCitizen"]
+    numeric_cols = [
+        "tenure",
+        "MonthlyCharges",
+        "TotalCharges",
+        "SeniorCitizen",
+        # FeatureEngineer creates these numeric columns
+        "tenure_squared",
+        "is_new_customer",
+        "is_long_term",
+        "avg_monthly_charge",
+        "charge_discrepancy",
+        "total_value_high",
+        "charge_ratio",
+        "charge_above_mean",
+        "monthly_charges_squared",
+        "value_per_month",
+        "high_charge_low_tenure",
+        "service_count",
+        "has_multiple_services",
+    ]
     
     # Convert numeric columns to proper numeric types
     for col in numeric_cols:
@@ -200,16 +225,24 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
         else:
             df[col] = 0
 
-    # Ensure all columns are the correct dtype
-    # Categorical should be object (string), numeric should be int64/float64
+    # CRITICAL: Ensure categorical columns are object dtype (not category or mixed)
+    # and numeric columns are int64/float64
     for col in categorical_cols:
         if col in df.columns:
+            # Convert to object dtype explicitly, ensuring all values are strings
             df[col] = df[col].astype('object')
+            # Double-check: convert any non-string values to strings
+            df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else 'Unknown')
     
     for col in numeric_cols:
         if col in df.columns:
-            # Keep as numeric (int64 or float64)
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            # Ensure numeric type
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float64')
+
+    # Debug: Log column dtypes before prediction (helpful for troubleshooting)
+    print(f"DataFrame dtypes before prediction:")
+    for col in df.columns:
+        print(f"  {col}: {df[col].dtype} (sample value: {df[col].iloc[0] if len(df) > 0 else 'N/A'})")
 
     # Now run prediction
     preds = model.predict(df)
