@@ -155,9 +155,10 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
             # Add dummy customerID - unique per row
             df["customerID"] = "pred_" + pd.Series(range(len(df))).astype(str)
 
-    # Enforce data types to match training:
-    # - Categorical columns as strings
-    # - Numeric columns as numeric
+    # CRITICAL: Convert types IMMEDIATELY to match training data types
+    # The ColumnTransformer selects columns by dtype, so types must match exactly
+    
+    # Define categorical columns (will be OneHotEncoded)
     categorical_cols = [
         "customerID",
         "PhoneService",
@@ -176,14 +177,39 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
         "Dependents",
         "gender",
     ]
+    
+    # Convert categorical columns to strings (object dtype)
+    # This must happen BEFORE any sklearn operations
     for col in categorical_cols:
         if col in df.columns:
-            df[col] = df[col].astype(str)
+            # Force to string, handling None/NaN
+            df[col] = df[col].astype(str).replace('nan', 'Unknown').replace('None', 'Unknown')
+        # If column is missing, add it with a default value
+        else:
+            df[col] = 'Unknown'
 
+    # Define numeric columns (will be StandardScaled)
     numeric_cols = ["tenure", "MonthlyCharges", "TotalCharges", "SeniorCitizen"]
+    
+    # Convert numeric columns to proper numeric types
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            # Convert to numeric, coercing errors to NaN, then fill NaN with 0
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        # If column is missing, add it with default value 0
+        else:
+            df[col] = 0
+
+    # Ensure all columns are the correct dtype
+    # Categorical should be object (string), numeric should be int64/float64
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = df[col].astype('object')
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            # Keep as numeric (int64 or float64)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     # Now run prediction
     preds = model.predict(df)
@@ -192,5 +218,4 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
     if hasattr(preds, "tolist"):
         return preds.tolist()
     return list(preds)
-
 
