@@ -54,3 +54,26 @@ htmlcov/
 # Project assessment (temporary documentation)
 PROJECT_ASSESSMENT.md
 
+# Test files (temporary/local testing)
+test.py
+test_local_prediction.py
+docker_test.py
+test_docker_simple.sh
+test_docker_local.sh
+
+# Training scripts (local convenience scripts)
+retrain_model.sh
+train_docker.sh
+
+# Request/response test files
+request.json
+payload.json
+response.json
+
+# Docker test outputs
+docker_test_output.txt
+
+# Local test outputs
+test_output.txt
+*.log
+
