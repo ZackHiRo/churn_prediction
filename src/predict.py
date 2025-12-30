@@ -127,6 +127,29 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
     else:
         df = pd.DataFrame([payload])
 
+    # Handle ID columns: The model expects customerID if it was in training data
+    # The ColumnTransformer was fitted with customerID, so we need to provide it
+    id_column_variants = ['customerID', 'customer_id', 'CustomerID', 'Customer_ID', 
+                          'customerId', 'CustomerId']
+    
+    # Check if any ID column variant exists
+    existing_id_col = None
+    for col in id_column_variants:
+        if col in df.columns:
+            existing_id_col = col
+            break
+    
+    # If customerID is missing but model expects it, add a dummy value
+    # The OneHotEncoder will handle it, and since it's a unique dummy value,
+    # it won't match any training categories and will be ignored (handle_unknown='ignore')
+    if 'customerID' not in df.columns:
+        if existing_id_col:
+            # Rename existing ID column to customerID
+            df = df.rename(columns={existing_id_col: 'customerID'})
+        else:
+            # Add dummy customerID - will be encoded but won't affect prediction
+            df['customerID'] = 'pred_' + pd.Series(range(len(df))).astype(str)
+
     preds = model.predict(df)
     # Ensure list of floats (probabilities or labels depending on model)
     if hasattr(preds, "tolist"):
