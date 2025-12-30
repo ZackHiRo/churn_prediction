@@ -157,11 +157,9 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
 
     # CRITICAL: Convert types IMMEDIATELY to match training data types
     # The ColumnTransformer selects columns by dtype, so types must match exactly
-    # IMPORTANT: Only handle INPUT columns here - FeatureEngineer will create derived columns
     
-    # Define INPUT categorical columns (raw data from user - will be OneHotEncoded)
-    # These must be object dtype (string) to match training
-    input_categorical_cols = [
+    # Define categorical columns (will be OneHotEncoded)
+    categorical_cols = [
         "customerID",
         "PhoneService",
         "MultipleLines",
@@ -178,48 +176,73 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
         "Partner",
         "Dependents",
         "gender",
+        # FeatureEngineer creates these categorical columns
+        "tenure_group",
+        "charge_tier",
     ]
     
-    # Convert INPUT categorical columns to strings (object dtype)
-    # This must happen BEFORE FeatureEngineer runs
-    for col in input_categorical_cols:
+    # Convert categorical columns to strings (object dtype)
+    # This must happen BEFORE any sklearn operations
+    for col in categorical_cols:
         if col in df.columns:
-            # Force to string, handling None/NaN
-            df[col] = df[col].astype(str).replace('nan', 'Unknown').replace('None', 'Unknown')
-            # Ensure all values are actually strings (handle mixed types)
-            df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) and x != '' else 'Unknown')
+            # Force to string, handling None/NaN and category types
+            if df[col].dtype.name == 'category':
+                df[col] = df[col].astype(str)
+            else:
+                df[col] = df[col].astype(str).replace('nan', 'Unknown').replace('None', 'Unknown')
         # If column is missing, add it with a default value
         else:
             df[col] = 'Unknown'
 
-    # Define INPUT numeric columns (raw data from user - will be StandardScaled)
-    # These must be int64/float64 to match training
-    input_numeric_cols = [
+    # Define numeric columns (will be StandardScaled)
+    numeric_cols = [
         "tenure",
         "MonthlyCharges",
         "TotalCharges",
         "SeniorCitizen",
+        # FeatureEngineer creates these numeric columns
+        "tenure_squared",
+        "is_new_customer",
+        "is_long_term",
+        "avg_monthly_charge",
+        "charge_discrepancy",
+        "total_value_high",
+        "charge_ratio",
+        "charge_above_mean",
+        "monthly_charges_squared",
+        "value_per_month",
+        "high_charge_low_tenure",
+        "service_count",
+        "has_multiple_services",
     ]
     
-    # Convert INPUT numeric columns to proper numeric types
-    for col in input_numeric_cols:
+    # Convert numeric columns to proper numeric types
+    for col in numeric_cols:
         if col in df.columns:
             # Convert to numeric, coercing errors to NaN, then fill NaN with 0
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float64')
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         # If column is missing, add it with default value 0
         else:
-            df[col] = 0.0
+            df[col] = 0
 
-    # Ensure all categorical columns are object dtype (not category or mixed)
-    for col in input_categorical_cols:
+    # CRITICAL: Ensure categorical columns are object dtype (not category or mixed)
+    # and numeric columns are int64/float64
+    for col in categorical_cols:
         if col in df.columns:
+            # Convert to object dtype explicitly, ensuring all values are strings
             df[col] = df[col].astype('object')
+            # Double-check: convert any non-string values to strings
+            df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else 'Unknown')
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            # Ensure numeric type
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype('float64')
 
     # Debug: Log column dtypes before prediction (helpful for troubleshooting)
-    print(f"DataFrame dtypes before prediction (input columns only):")
+    print(f"DataFrame dtypes before prediction:")
     for col in df.columns:
-        if col in input_categorical_cols + input_numeric_cols:
-            print(f"  {col}: {df[col].dtype} (sample value: {df[col].iloc[0] if len(df) > 0 else 'N/A'})")
+        print(f"  {col}: {df[col].dtype} (sample value: {df[col].iloc[0] if len(df) > 0 else 'N/A'})")
 
     # Now run prediction
     preds = model.predict(df)
