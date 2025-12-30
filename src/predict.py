@@ -127,78 +127,67 @@ def predict_from_json(model: mlflow.pyfunc.PyFuncModel, payload: Dict[str, Any])
     else:
         df = pd.DataFrame([payload])
 
-    # Handle ID columns: The model expects customerID if it was in training data
-    # The ColumnTransformer was fitted with customerID, so we need to provide it
-    id_column_variants = ['customerID', 'customer_id', 'CustomerID', 'Customer_ID', 
-                          'customerId', 'CustomerId']
-    
+    # Handle ID columns: The model expects customerID if it was in training data.
+    # The ColumnTransformer was fitted with customerID, so we need to provide it.
+    id_column_variants = [
+        "customerID",
+        "customer_id",
+        "CustomerID",
+        "Customer_ID",
+        "customerId",
+        "CustomerId",
+    ]
+
     # Check if any ID column variant exists
     existing_id_col = None
     for col in id_column_variants:
         if col in df.columns:
             existing_id_col = col
             break
-    
-    # If customerID is missing but model expects it, add a dummy value
-    # The OneHotEncoder will handle it, and since it's a unique dummy value,
-    # it won't match any training categories and will be ignored (handle_unknown='ignore')
-    if 'customerID' not in df.columns:
+
+    # If customerID is missing but model expects it, add/rename it.
+    # The OneHotEncoder will handle unseen values (handle_unknown="ignore").
+    if "customerID" not in df.columns:
         if existing_id_col:
             # Rename existing ID column to customerID
-            df = df.rename(columns={existing_id_col: 'customerID'})
+            df = df.rename(columns={existing_id_col: "customerID"})
         else:
-            # Add dummy customerID - will be encoded but won't affect prediction
-            df['customerID'] = 'pred_' + pd.Series(range(len(df))).astype(str)
+            # Add dummy customerID - unique per row
+            df["customerID"] = "pred_" + pd.Series(range(len(df))).astype(str)
 
-    # Try to predict, and if columns are missing, add them with defaults
-    try:
-        preds = model.predict(df)
-    except ValueError as e:
-        error_msg = str(e)
-        if "columns are missing" in error_msg:
-            # Try to extract missing columns from error message or model
-            # Get expected columns from the sklearn pipeline if available
-            try:
-                if hasattr(model, 'sklearn_model'):
-                    pipeline = model.sklearn_model
-                    if hasattr(pipeline, 'named_steps') and 'preprocessor' in pipeline.named_steps:
-                        preprocessor = pipeline.named_steps['preprocessor']
-                        if hasattr(preprocessor, 'feature_names_in_'):
-                            expected_cols = set(preprocessor.feature_names_in_)
-                            provided_cols = set(df.columns)
-                            missing_cols = expected_cols - provided_cols
-                            
-                            print(f"Warning: Missing columns detected: {missing_cols}")
-                            print(f"Provided columns: {provided_cols}")
-                            print(f"Expected columns: {expected_cols}")
-                            
-                            # Add missing columns with default values
-                            for col in missing_cols:
-                                if col.lower() in ['customerid', 'customer_id']:
-                                    df[col] = 'pred_' + pd.Series(range(len(df))).astype(str)
-                                elif df.select_dtypes(include=['int64', 'float64']).empty:
-                                    # If no numeric columns, assume it's numeric
-                                    df[col] = 0
-                                else:
-                                    # Try to infer type from existing columns
-                                    df[col] = 0  # Default to 0 for numeric
-                            
-                            # Retry prediction
-                            preds = model.predict(df)
-                        else:
-                            raise
-                    else:
-                        raise
-                else:
-                    raise
-            except Exception as e2:
-                # If we can't fix it automatically, re-raise with better error message
-                print(f"Error: {error_msg}")
-                print(f"Provided columns: {list(df.columns)}")
-                raise ValueError(f"Missing columns error. Original: {error_msg}. Provided columns: {list(df.columns)}") from e
-        else:
-            raise
-    
+    # Enforce data types to match training:
+    # - Categorical columns as strings
+    # - Numeric columns as numeric
+    categorical_cols = [
+        "customerID",
+        "PhoneService",
+        "MultipleLines",
+        "InternetService",
+        "OnlineSecurity",
+        "OnlineBackup",
+        "DeviceProtection",
+        "TechSupport",
+        "StreamingTV",
+        "StreamingMovies",
+        "Contract",
+        "PaperlessBilling",
+        "PaymentMethod",
+        "Partner",
+        "Dependents",
+        "gender",
+    ]
+    for col in categorical_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
+    numeric_cols = ["tenure", "MonthlyCharges", "TotalCharges", "SeniorCitizen"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Now run prediction
+    preds = model.predict(df)
+
     # Ensure list of floats (probabilities or labels depending on model)
     if hasattr(preds, "tolist"):
         return preds.tolist()
